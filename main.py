@@ -11,137 +11,123 @@ from telegram import (
 from telegram.ext import (
     Application,
     CommandHandler,
-    MessageHandler,
     CallbackQueryHandler,
+    MessageHandler,
     ContextTypes,
     filters,
 )
 
-# ============================================================
+from sources.soundcloud import SoundCloudSource
+
+
+# =========================================================
 # НАСТРОЙКИ
-# ============================================================
+# =========================================================
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-API_URL = "https://itunes.apple.com/search"
+ITUNES_API = "https://itunes.apple.com/search"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 
-# Результаты поиска пользователей
-user_results = {}
+logger = logging.getLogger(__name__)
 
-# Избранное
+
+# =========================================================
+# ДАННЫЕ ПОЛЬЗОВАТЕЛЕЙ
+# =========================================================
+
+user_results = {}
 user_favorites = {}
 
 
-# ============================================================
-# ОСНОВНОЕ МЕНЮ
-# ============================================================
+# =========================================================
+# SOUNDCLOUD
+# =========================================================
+
+soundcloud = SoundCloudSource()
+
+
+# =========================================================
+# ГЛАВНОЕ МЕНЮ
+# =========================================================
 
 def main_menu_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton(
-                "🔎 Поиск",
-                callback_data="search",
-            ),
-            InlineKeyboardButton(
-                "❤️ Моя музыка",
-                callback_data="favorites",
-            ),
+            InlineKeyboardButton("🔎 Поиск", callback_data="search"),
         ],
         [
-            InlineKeyboardButton(
-                "ℹ️ Помощь",
-                callback_data="help",
-            ),
+            InlineKeyboardButton("❤️ Моя музыка", callback_data="favorites"),
+        ],
+        [
+            InlineKeyboardButton("⚙️ Источники", callback_data="sources"),
+        ],
+        [
+            InlineKeyboardButton("ℹ️ Помощь", callback_data="help"),
         ],
     ])
 
 
-# ============================================================
+# =========================================================
 # КНОПКИ РЕЗУЛЬТАТОВ
-# ============================================================
+# =========================================================
 
 def results_keyboard(tracks):
-    keyboard = []
+    buttons = []
 
     for index, track in enumerate(tracks):
-        title = track.get(
-            "trackName",
-            "Неизвестный трек",
-        )
+        title = track.get("trackName", "Без названия")
+        artist = track.get("artistName", "Неизвестный исполнитель")
 
-        artist = track.get(
-            "artistName",
-            "Неизвестный исполнитель",
-        )
+        text = f"🎵 {title} — {artist}"
 
-        button_text = f"🎵 {title} — {artist}"
+        if len(text) > 60:
+            text = text[:57] + "..."
 
-        # Telegram ограничивает callback_data,
-        # поэтому передаём только номер результата.
-        if len(button_text) > 55:
-            button_text = button_text[:52] + "..."
-
-        keyboard.append([
+        buttons.append([
             InlineKeyboardButton(
-                button_text,
+                text,
                 callback_data=f"play_{index}",
             )
         ])
 
-    keyboard.append([
-        InlineKeyboardButton(
-            "🔎 Новый поиск",
-            callback_data="search",
-        ),
-        InlineKeyboardButton(
-            "❤️ Моя музыка",
-            callback_data="favorites",
-        ),
+    buttons.append([
+        InlineKeyboardButton("🔎 Новый поиск", callback_data="search")
     ])
 
-    keyboard.append([
-        InlineKeyboardButton(
-            "🏠 Меню",
-            callback_data="menu",
-        )
+    buttons.append([
+        InlineKeyboardButton("❤️ Моя музыка", callback_data="favorites")
     ])
 
-    return InlineKeyboardMarkup(keyboard)
+    buttons.append([
+        InlineKeyboardButton("⬅️ Меню", callback_data="menu")
+    ])
+
+    return InlineKeyboardMarkup(buttons)
 
 
-# ============================================================
+# =========================================================
 # START
-# ============================================================
+# =========================================================
 
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-    user_id = update.effective_user.id
-
-    user_favorites.setdefault(
-        user_id,
-        [],
-    )
-
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "🎵 <b>MUSIC BOT</b>\n\n"
-        "🔎 <b>Поиск музыки</b>\n\n"
-        "Отправь название песни или исполнителя.\n\n"
+        "<b>🎵 MUSIC BOT</b>\n\n"
+        "Поиск музыки в нескольких источниках.\n\n"
+        "Нажми <b>🔎 Поиск</b> и введи:\n"
+        "• исполнителя\n"
+        "• название трека\n"
+        "• исполнителя + название\n\n"
         "Например:\n"
-        "• The Weeknd\n"
-        "• Blinding Lights\n"
-        "• dabbackwood\n"
-        "• Моя Мишель\n"
-        "• MACAN\n"
-        "• Miyagi\n\n"
-        "Выбери действие:"
+        "<code>The Weeknd</code>\n"
+        "<code>Blinding Lights</code>\n"
+        "<code>Моя Мишель</code>\n"
+        "<code>MACAN</code>\n"
+        "<code>Miyagi</code>"
     )
 
     await update.message.reply_text(
@@ -151,58 +137,60 @@ async def start(
     )
 
 
-# ============================================================
+# =========================================================
 # ПОИСК
-# ============================================================
+# =========================================================
 
-async def search_music(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-    if not update.message:
+async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    if update.callback_query:
+        await update.callback_query.answer()
+
+        await update.callback_query.message.reply_text(
+            "🔎 Введи название трека или исполнителя:"
+        )
+
+        context.user_data["waiting_for_search"] = True
         return
 
-    search_query = update.message.text.strip()
+    if not context.user_data.get("waiting_for_search"):
+        return
 
-    if len(search_query) < 2:
+    context.user_data["waiting_for_search"] = False
+
+    query = update.message.text.strip()
+
+    if not query:
         await update.message.reply_text(
-            "❌ Введи название песни или исполнителя."
+            "❌ Введи название трека или исполнителя."
         )
         return
 
-    if len(search_query) > 200:
-        await update.message.reply_text(
-            "❌ Запрос слишком длинный."
-        )
-        return
-
-    status = await update.message.reply_text(
-        "🔎 <b>Ищу музыку...</b>",
+    await update.message.reply_text(
+        f"🔎 Ищу: <b>{html.escape(query)}</b>...",
         parse_mode="HTML",
     )
 
-    # ========================================================
-    # ВАЖНО:
-    # country=RU помогает искать русскую музыку.
-    # lang=ru_ru задаёт русский язык каталога.
-    # ========================================================
+    tracks = []
 
-    params = {
-        "term": search_query,
-        "media": "music",
-        "entity": "song",
-        "country": "RU",
-        "lang": "ru_ru",
-        "limit": 10,
-    }
+    # -----------------------------------------------------
+    # iTunes / Apple Music
+    # -----------------------------------------------------
 
     try:
-        async with httpx.AsyncClient(
-            timeout=20
-        ) as client:
+        params = {
+            "term": query,
+            "media": "music",
+            "entity": "song",
+            "country": "RU",
+            "lang": "ru_ru",
+            "limit": 10,
+        }
 
+        async with httpx.AsyncClient(timeout=15) as client:
             response = await client.get(
-                API_URL,
+                ITUNES_API,
                 params=params,
             )
 
@@ -210,163 +198,90 @@ async def search_music(
 
             data = response.json()
 
-        tracks = data.get(
-            "results",
-            [],
-        )
+        tracks = data.get("results", [])
 
-        # ====================================================
-        # ЕСЛИ В РОССИЙСКОМ КАТАЛОГЕ НИЧЕГО НЕТ,
-        # ДЕЛАЕМ ВТОРОЙ ПОИСК БЕЗ COUNTRY,
-        # ЧТОБЫ НЕ ТЕРЯТЬ РЕДКИЕ ТРЕКИ.
-        # ====================================================
-
+        # Fallback без country
         if not tracks:
-            fallback_params = {
-                "term": search_query,
-                "media": "music",
-                "entity": "song",
-                "lang": "ru_ru",
-                "limit": 10,
-            }
+            params.pop("country", None)
+            params.pop("lang", None)
 
-            async with httpx.AsyncClient(
-                timeout=20
-            ) as client:
-
-                fallback_response = await client.get(
-                    API_URL,
-                    params=fallback_params,
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.get(
+                    ITUNES_API,
+                    params=params,
                 )
 
-                fallback_response.raise_for_status()
+                response.raise_for_status()
 
-                fallback_data = (
-                    fallback_response.json()
-                )
+                data = response.json()
 
-            tracks = fallback_data.get(
-                "results",
-                [],
-            )
+            tracks = data.get("results", [])
 
-        # ====================================================
-        # НИЧЕГО НЕ НАЙДЕНО
-        # ====================================================
-
-        if not tracks:
-            await status.edit_text(
-                "😕 <b>Ничего не найдено</b>\n\n"
-                f"🔎 Запрос: "
-                f"<i>{html.escape(search_query)}</i>\n\n"
-                "Попробуй написать название "
-                "песни или исполнителя по-другому.",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(
-                            "🔎 Новый поиск",
-                            callback_data="search",
-                        ),
-                        InlineKeyboardButton(
-                            "🏠 Меню",
-                            callback_data="menu",
-                        ),
-                    ]
-                ]),
-            )
-            return
-
-        user_id = update.effective_user.id
-
-        # Сохраняем результаты
-        user_results[user_id] = {
-            "query": search_query,
-            "tracks": tracks,
-        }
-
-        # ====================================================
-        # ТЕПЕРЬ ЗДЕСЬ НЕТ СПИСКА 1,2,3...
-        # ОСТАЮТСЯ ТОЛЬКО КНОПКИ.
-        # ====================================================
-
-        text = (
-            "🎵 <b>MUSIC BOT</b>\n\n"
-            f"🔎 <b>Поиск:</b> "
-            f"<i>{html.escape(search_query)}</i>\n\n"
-            "━━━━━━━━━━━━━━━━\n\n"
-            "👇 <b>Выбери трек:</b>"
+    except Exception as error:
+        logger.exception(
+            "Ошибка поиска iTunes: %s",
+            error,
         )
 
-        await status.edit_text(
-            text,
-            parse_mode="HTML",
-            reply_markup=results_keyboard(
-                tracks
-            ),
-            disable_web_page_preview=True,
-        )
+    # -----------------------------------------------------
+    # СОХРАНЯЕМ РЕЗУЛЬТАТЫ
+    # -----------------------------------------------------
 
-    except httpx.TimeoutException:
+    user_results[user_id] = {
+        "query": query,
+        "tracks": tracks,
+    }
 
-        await status.edit_text(
-            "⏳ Поиск занял слишком много времени.\n\n"
-            "Попробуй ещё раз."
-        )
-
-    except httpx.HTTPError:
-
-        logging.exception(
-            "Ошибка музыкального API"
-        )
-
-        await status.edit_text(
-            "⚠️ Не удалось подключиться "
-            "к музыкальному поиску."
-        )
-
-    except Exception:
-
-        logging.exception(
-            "Неожиданная ошибка поиска"
-        )
-
-        await status.edit_text(
-            "⚠️ Произошла ошибка.\n\n"
-            "Попробуй ещё раз."
-        )
-
-
-# ============================================================
-# ВОСПРОИЗВЕДЕНИЕ ТРЕКА
-# ============================================================
-
-async def play_track(
-    query,
-    index,
-):
-    user_id = query.from_user.id
-
-    data = user_results.get(
-        user_id
-    )
-
-    if not data:
-        await query.answer(
-            "❌ Результаты устарели.",
-            show_alert=True,
+    if not tracks:
+        await update.message.reply_text(
+            "😔 Ничего не найдено.\n\n"
+            "Попробуй изменить запрос.",
+            reply_markup=main_menu_keyboard(),
         )
         return
 
-    tracks = data.get(
-        "tracks",
-        [],
+    text = (
+        "<b>🎵 MUSIC BOT</b>\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        f"🔎 Поиск: <b>{html.escape(query)}</b>\n\n"
+        "👇 Выбери трек:"
     )
 
+    await update.message.reply_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=results_keyboard(tracks),
+    )
+
+
+# =========================================================
+# ВОСПРОИЗВЕДЕНИЕ ТРЕКА
+# =========================================================
+
+async def play_track(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    index: int,
+):
+    query = update.callback_query
+    user_id = update.effective_user.id
+
+    await query.answer()
+
+    data = user_results.get(user_id)
+
+    if not data:
+        await query.message.reply_text(
+            "❌ Результаты поиска устарели.\n"
+            "Сделай новый поиск."
+        )
+        return
+
+    tracks = data.get("tracks", [])
+
     if index < 0 or index >= len(tracks):
-        await query.answer(
-            "❌ Трек не найден.",
-            show_alert=True,
+        await query.message.reply_text(
+            "❌ Трек не найден."
         )
         return
 
@@ -374,7 +289,7 @@ async def play_track(
 
     title = track.get(
         "trackName",
-        "Неизвестный трек",
+        "Без названия",
     )
 
     artist = track.get(
@@ -382,149 +297,120 @@ async def play_track(
         "Неизвестный исполнитель",
     )
 
-    preview_url = track.get(
-        "previewUrl"
-    )
+    preview_url = track.get("previewUrl")
+    track_url = track.get("trackViewUrl")
 
-    # ========================================================
-    # НЕТ ПРЕВЬЮ
-    # ========================================================
+    # -----------------------------------------------------
+    # ПРЕВЬЮ
+    # -----------------------------------------------------
 
-    if not preview_url:
+    if preview_url:
+        try:
+            async with httpx.AsyncClient(
+                timeout=30,
+                follow_redirects=True,
+            ) as client:
 
-        await query.answer(
-            "❌ Для этого трека нет доступного превью.",
-            show_alert=True,
-        )
+                response = await client.get(preview_url)
+                response.raise_for_status()
 
-        track_url = track.get(
-            "trackViewUrl"
-        )
+                audio_data = response.content
 
-        if track_url:
-
-            await query.message.reply_text(
-                (
+            await query.message.reply_audio(
+                audio=audio_data,
+                title=title,
+                performer=artist,
+                caption=(
                     f"🎵 <b>{html.escape(title)}</b>\n"
-                    f"👤 {html.escape(artist)}\n\n"
-                    "Для этого трека нет доступного "
-                    "аудио-превью."
+                    f"🎤 {html.escape(artist)}\n\n"
+                    "▶️ 30-секундное превью"
                 ),
                 parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(
-                            "🔗 Открыть официальный источник",
-                            url=track_url,
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            "⬅️ К результатам",
-                            callback_data="back_results",
-                        )
-                    ],
-                ]),
             )
 
-        return
+            return
 
-    await query.answer(
-        "🎵 Загружаю..."
+        except Exception as error:
+            logger.exception(
+                "Ошибка отправки превью: %s",
+                error,
+            )
+
+    # -----------------------------------------------------
+    # ЕСЛИ ПРЕВЬЮ НЕТ
+    # -----------------------------------------------------
+
+    buttons = []
+
+    if track_url:
+        buttons.append([
+            InlineKeyboardButton(
+                "🎵 Открыть трек",
+                url=track_url,
+            )
+        ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            "⬅️ Назад к результатам",
+            callback_data="back_results",
+        )
+    ])
+
+    await query.message.reply_text(
+        (
+            f"🎵 <b>{html.escape(title)}</b>\n"
+            f"🎤 {html.escape(artist)}\n\n"
+            "Для этого трека доступна ссылка "
+            "на официальный источник."
+        ),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(buttons),
     )
 
-    try:
 
-        async with httpx.AsyncClient(
-            timeout=30
-        ) as client:
-
-            response = await client.get(
-                preview_url
-            )
-
-            response.raise_for_status()
-
-            audio_data = response.content
-
-        await query.message.reply_audio(
-            audio=audio_data,
-            title=title,
-            performer=artist,
-            caption=(
-                f"🎵 <b>{html.escape(title)}</b>\n"
-                f"👤 {html.escape(artist)}\n\n"
-                "▶️ Аудио-превью"
-            ),
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "❤️ В избранное",
-                        callback_data=f"favorite_{index}",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "🔎 К результатам",
-                        callback_data="back_results",
-                    )
-                ],
-            ]),
-        )
-
-    except httpx.HTTPError:
-
-        logging.exception(
-            "Ошибка загрузки аудио"
-        )
-
-        await query.message.reply_text(
-            "⚠️ Не удалось загрузить аудио-превью."
-        )
-
-    except Exception:
-
-        logging.exception(
-            "Ошибка отправки аудио"
-        )
-
-        await query.message.reply_text(
-            "⚠️ Не удалось отправить аудио."
-        )
-
-
-# ============================================================
+# =========================================================
 # ИЗБРАННОЕ
-# ============================================================
+# =========================================================
+
+def favorite_keyboard(track_index):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "▶️ Открыть",
+                callback_data=f"favplay_{track_index}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🗑 Удалить",
+                callback_data=f"favorite_{track_index}",
+            )
+        ],
+    ])
+
 
 async def toggle_favorite(
-    query,
-    index,
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    index: int,
 ):
-    user_id = query.from_user.id
+    query = update.callback_query
+    user_id = update.effective_user.id
 
-    data = user_results.get(
-        user_id
-    )
+    await query.answer()
+
+    data = user_results.get(user_id)
 
     if not data:
-        await query.answer(
-            "❌ Результаты устарели.",
-            show_alert=True,
+        await query.message.reply_text(
+            "❌ Результаты поиска устарели."
         )
         return
 
-    tracks = data.get(
-        "tracks",
-        [],
-    )
+    tracks = data.get("tracks", [])
 
     if index < 0 or index >= len(tracks):
-        await query.answer(
-            "❌ Трек не найден.",
-            show_alert=True,
-        )
         return
 
     track = tracks[index]
@@ -534,48 +420,41 @@ async def toggle_favorite(
         [],
     )
 
-    track_id = track.get(
-        "trackId"
+    track_id = track.get("trackId")
+
+    if any(
+        item.get("trackId") == track_id
+        for item in favorites
+    ):
+        await query.message.reply_text(
+            "❤️ Этот трек уже в твоей музыке."
+        )
+        return
+
+    favorites.append(track)
+
+    await query.message.reply_text(
+        "❤️ Трек добавлен в «Моя музыка»."
     )
 
-    existing = next(
-        (
-            item
-            for item in favorites
-            if item.get("trackId") == track_id
-        ),
-        None,
-    )
 
-    if existing:
-
-        favorites.remove(
-            existing
-        )
-
-        await query.answer(
-            "💔 Убрано из избранного"
-        )
-
-    else:
-
-        favorites.append(
-            track
-        )
-
-        await query.answer(
-            "❤️ Добавлено в избранное"
-        )
-
-
-# ============================================================
+# =========================================================
 # МОЯ МУЗЫКА
-# ============================================================
+# =========================================================
 
 async def show_favorites(
-    query,
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
 ):
-    user_id = query.from_user.id
+    query = update.callback_query
+
+    if query:
+        await query.answer()
+        user_id = query.from_user.id
+        message = query.message
+    else:
+        user_id = update.effective_user.id
+        message = update.message
 
     favorites = user_favorites.get(
         user_id,
@@ -583,45 +462,20 @@ async def show_favorites(
     )
 
     if not favorites:
-
-        await query.message.reply_text(
+        await message.reply_text(
             "❤️ <b>Моя музыка</b>\n\n"
-            "Здесь пока ничего нет.\n\n"
-            "Найди музыку и добавь понравившиеся "
-            "треки в избранное.",
+            "Здесь пока ничего нет.",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "🔎 Найти музыку",
-                        callback_data="search",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "🏠 Меню",
-                        callback_data="menu",
-                    )
-                ],
-            ]),
+            reply_markup=main_menu_keyboard(),
         )
-
         return
 
-    text = (
-        "❤️ <b>МОЯ МУЗЫКА</b>\n\n"
-        "👇 Выбери трек:"
-    )
+    buttons = []
 
-    keyboard = []
-
-    for index, track in enumerate(
-        favorites
-    ):
-
+    for index, track in enumerate(favorites):
         title = track.get(
             "trackName",
-            "Неизвестный трек",
+            "Без названия",
         )
 
         artist = track.get(
@@ -629,48 +483,42 @@ async def show_favorites(
             "Неизвестный исполнитель",
         )
 
-        button_text = (
-            f"🎵 {title} — {artist}"
-        )
+        text = f"🎵 {title} — {artist}"
 
-        if len(button_text) > 55:
-            button_text = (
-                button_text[:52] + "..."
-            )
+        if len(text) > 60:
+            text = text[:57] + "..."
 
-        keyboard.append([
+        buttons.append([
             InlineKeyboardButton(
-                button_text,
+                text,
                 callback_data=f"favplay_{index}",
             )
         ])
 
-    keyboard.append([
+    buttons.append([
         InlineKeyboardButton(
-            "🔎 Поиск",
-            callback_data="search",
-        ),
-        InlineKeyboardButton(
-            "🏠 Меню",
+            "⬅️ Меню",
             callback_data="menu",
-        ),
+        )
     ])
 
-    await query.message.reply_text(
-        text,
+    await message.reply_text(
+        "❤️ <b>Моя музыка</b>\n\n"
+        "Твои сохранённые треки:",
         parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(
-            keyboard
-        ),
-        disable_web_page_preview=True,
+        reply_markup=InlineKeyboardMarkup(buttons),
     )
 
 
 async def play_favorite(
-    query,
-    index,
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    index: int,
 ):
-    user_id = query.from_user.id
+    query = update.callback_query
+    user_id = update.effective_user.id
+
+    await query.answer()
 
     favorites = user_favorites.get(
         user_id,
@@ -678,19 +526,16 @@ async def play_favorite(
     )
 
     if index < 0 or index >= len(favorites):
-
-        await query.answer(
-            "❌ Трек не найден.",
-            show_alert=True,
+        await query.message.reply_text(
+            "❌ Трек не найден."
         )
-
         return
 
     track = favorites[index]
 
     title = track.get(
         "trackName",
-        "Неизвестный трек",
+        "Без названия",
     )
 
     artist = track.get(
@@ -698,326 +543,300 @@ async def play_favorite(
         "Неизвестный исполнитель",
     )
 
-    preview_url = track.get(
-        "previewUrl"
-    )
+    preview_url = track.get("previewUrl")
+    track_url = track.get("trackViewUrl")
 
-    if not preview_url:
+    if preview_url:
+        try:
+            async with httpx.AsyncClient(
+                timeout=30,
+                follow_redirects=True,
+            ) as client:
 
-        await query.answer(
-            "❌ Для этого трека нет превью.",
-            show_alert=True,
-        )
+                response = await client.get(preview_url)
+                response.raise_for_status()
 
-        return
+                audio_data = response.content
 
-    await query.answer(
-        "🎵 Загружаю..."
-    )
-
-    try:
-
-        async with httpx.AsyncClient(
-            timeout=30
-        ) as client:
-
-            response = await client.get(
-                preview_url
+            await query.message.reply_audio(
+                audio=audio_data,
+                title=title,
+                performer=artist,
+                caption=(
+                    f"🎵 <b>{html.escape(title)}</b>\n"
+                    f"🎤 {html.escape(artist)}\n\n"
+                    "▶️ 30-секундное превью"
+                ),
+                parse_mode="HTML",
             )
 
-            response.raise_for_status()
+            return
 
-            audio_data = response.content
+        except Exception as error:
+            logger.exception(
+                "Ошибка избранного: %s",
+                error,
+            )
 
-        await query.message.reply_audio(
-            audio=audio_data,
-            title=title,
-            performer=artist,
-            caption=(
-                f"🎵 <b>{html.escape(title)}</b>\n"
-                f"👤 {html.escape(artist)}"
-            ),
-            parse_mode="HTML",
-        )
+    buttons = []
 
-    except Exception:
+    if track_url:
+        buttons.append([
+            InlineKeyboardButton(
+                "🎵 Открыть трек",
+                url=track_url,
+            )
+        ])
 
-        logging.exception(
-            "Ошибка избранного"
-        )
-
-        await query.message.reply_text(
-            "⚠️ Не удалось загрузить аудио."
-        )
-
-
-# ============================================================
-# МЕНЮ
-# ============================================================
-
-async def show_menu(
-    query,
-):
     await query.message.reply_text(
-        "🎵 <b>MUSIC BOT</b>\n\n"
-        "🔎 Поиск музыки\n"
-        "❤️ Моя музыка\n"
-        "🎧 Аудио-превью\n\n"
-        "Выбери действие:",
+        f"🎵 <b>{html.escape(title)}</b>\n"
+        f"🎤 {html.escape(artist)}\n\n"
+        "Доступна ссылка на официальный источник.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+# =========================================================
+# ИСТОЧНИКИ
+# =========================================================
+
+async def show_sources(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    query = update.callback_query
+
+    await query.answer()
+
+    soundcloud_status = (
+        "🟢 подключён"
+        if soundcloud.enabled
+        else "⚪ ключи не добавлены"
+    )
+
+    text = (
+        "<b>⚙️ ИСТОЧНИКИ</b>\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        "🍎 Apple Music / iTunes — 🟢 активно\n"
+        "🟢 Spotify — подготовлено\n"
+        "▶️ YouTube — подготовлено\n"
+        f"☁️ SoundCloud — {soundcloud_status}\n\n"
+        "SoundCloud включится автоматически, "
+        "когда в Railway будут добавлены его API-ключи."
+    )
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "⬅️ Меню",
+                callback_data="menu",
+            )
+        ]
+    ])
+
+    await query.message.reply_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
+
+
+# =========================================================
+# ПОМОЩЬ
+# =========================================================
+
+async def show_help(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    query = update.callback_query
+
+    await query.answer()
+
+    text = (
+        "<b>ℹ️ ПОМОЩЬ</b>\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        "🔎 <b>Поиск</b> — найти музыку.\n\n"
+        "❤️ <b>Моя музыка</b> — сохранённые треки.\n\n"
+        "⚙️ <b>Источники</b> — подключённые музыкальные сервисы.\n\n"
+        "🎵 Для Apple Music/iTunes доступны "
+        "официальные превью и ссылки.\n\n"
+        "☁️ SoundCloud будет подключён через "
+        "официальный API после добавления ключей."
+    )
+
+    await query.message.reply_text(
+        text,
         parse_mode="HTML",
         reply_markup=main_menu_keyboard(),
     )
 
 
-async def show_help(
-    query,
-):
-    await query.message.reply_text(
-        "ℹ️ <b>Как пользоваться</b>\n\n"
-        "🔎 Отправь название песни "
-        "или имя исполнителя.\n\n"
-        "🎵 Нажми на найденный трек — "
-        "бот сразу отправит доступное "
-        "аудио-превью.\n\n"
-        "❤️ Понравившийся трек можно "
-        "добавить в «Моя музыка».",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "🔎 Поиск",
-                    callback_data="search",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🏠 Меню",
-                    callback_data="menu",
-                )
-            ],
-        ]),
-    )
-
-
-# ============================================================
+# =========================================================
 # CALLBACK
-# ============================================================
+# =========================================================
 
 async def callback_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
     query = update.callback_query
+
     data = query.data
 
-    try:
+    if data == "menu":
+        await query.answer()
 
-        # ----------------------------------------------------
-        # МЕНЮ
-        # ----------------------------------------------------
-
-        if data == "menu":
-
-            await query.answer()
-
-            await show_menu(
-                query
-            )
-
-        # ----------------------------------------------------
-        # ПОИСК
-        # ----------------------------------------------------
-
-        elif data == "search":
-
-            await query.answer()
-
-            await query.message.reply_text(
-                "🔎 <b>Поиск музыки</b>\n\n"
-                "Отправь название песни "
-                "или имя исполнителя.",
-                parse_mode="HTML",
-            )
-
-        # ----------------------------------------------------
-        # ПОМОЩЬ
-        # ----------------------------------------------------
-
-        elif data == "help":
-
-            await query.answer()
-
-            await show_help(
-                query
-            )
-
-        # ----------------------------------------------------
-        # ИЗБРАННОЕ
-        # ----------------------------------------------------
-
-        elif data == "favorites":
-
-            await query.answer()
-
-            await show_favorites(
-                query
-            )
-
-        # ----------------------------------------------------
-        # ТРЕК
-        # ----------------------------------------------------
-
-        elif data.startswith("play_"):
-
-            index = int(
-                data.replace(
-                    "play_",
-                    "",
-                )
-            )
-
-            # Сразу отправляем аудио.
-            # Никакой промежуточной карточки.
-            await play_track(
-                query,
-                index,
-            )
-
-        # ----------------------------------------------------
-        # ИЗБРАННОЕ: PLAY
-        # ----------------------------------------------------
-
-        elif data.startswith("favplay_"):
-
-            index = int(
-                data.replace(
-                    "favplay_",
-                    "",
-                )
-            )
-
-            await play_favorite(
-                query,
-                index,
-            )
-
-        # ----------------------------------------------------
-        # ДОБАВИТЬ В ИЗБРАННОЕ
-        # ----------------------------------------------------
-
-        elif data.startswith("favorite_"):
-
-            index = int(
-                data.replace(
-                    "favorite_",
-                    "",
-                )
-            )
-
-            await toggle_favorite(
-                query,
-                index,
-            )
-
-        # ----------------------------------------------------
-        # НАЗАД К РЕЗУЛЬТАТАМ
-        # ----------------------------------------------------
-
-        elif data == "back_results":
-
-            await query.answer()
-
-            user_id = query.from_user.id
-
-            result = user_results.get(
-                user_id
-            )
-
-            if not result:
-
-                await query.message.reply_text(
-                    "❌ Результаты поиска "
-                    "больше недоступны."
-                )
-
-                return
-
-            tracks = result["tracks"]
-            search_query = result["query"]
-
-            text = (
-                "🎵 <b>MUSIC BOT</b>\n\n"
-                f"🔎 <b>Поиск:</b> "
-                f"<i>{html.escape(search_query)}</i>\n\n"
-                "━━━━━━━━━━━━━━━━\n\n"
-                "👇 <b>Выбери трек:</b>"
-            )
-
-            await query.message.reply_text(
-                text,
-                parse_mode="HTML",
-                reply_markup=results_keyboard(
-                    tracks
-                ),
-                disable_web_page_preview=True,
-            )
-
-    except Exception:
-
-        logging.exception(
-            "Ошибка callback"
+        await query.message.reply_text(
+            "🎵 <b>Главное меню</b>",
+            parse_mode="HTML",
+            reply_markup=main_menu_keyboard(),
         )
+        return
 
-        try:
+    if data == "search":
+        await search_music(update, context)
+        return
 
-            await query.answer(
-                "⚠️ Произошла ошибка.",
-                show_alert=True,
+    if data == "favorites":
+        await show_favorites(update, context)
+        return
+
+    if data == "sources":
+        await show_sources(update, context)
+        return
+
+    if data == "help":
+        await show_help(update, context)
+        return
+
+    if data == "back_results":
+        await query.answer()
+
+        user_id = update.effective_user.id
+        result = user_results.get(user_id)
+
+        if not result:
+            await query.message.reply_text(
+                "❌ Результаты поиска устарели.",
+                reply_markup=main_menu_keyboard(),
             )
+            return
 
-        except Exception:
-            pass
+        query_text = result.get("query", "")
+        tracks = result.get("tracks", [])
+
+        await query.message.reply_text(
+            f"🔎 <b>{html.escape(query_text)}</b>\n\n"
+            "👇 Выбери трек:",
+            parse_mode="HTML",
+            reply_markup=results_keyboard(tracks),
+        )
+        return
+
+    if data.startswith("play_"):
+        try:
+            index = int(data.split("_", 1)[1])
+        except ValueError:
+            return
+
+        await play_track(
+            update,
+            context,
+            index,
+        )
+        return
+
+    if data.startswith("favplay_"):
+        try:
+            index = int(data.split("_", 1)[1])
+        except ValueError:
+            return
+
+        await play_favorite(
+            update,
+            context,
+            index,
+        )
+        return
+
+    if data.startswith("favorite_"):
+        try:
+            index = int(data.split("_", 1)[1])
+        except ValueError:
+            return
+
+        await toggle_favorite(
+            update,
+            context,
+            index,
+        )
+        return
 
 
-# ============================================================
-# ЗАПУСК
-# ============================================================
+# =========================================================
+# ТЕКСТОВЫЕ СООБЩЕНИЯ
+# =========================================================
+
+async def text_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    if context.user_data.get("waiting_for_search"):
+        await search_music(
+            update,
+            context,
+        )
+        return
+
+    await update.message.reply_text(
+        "❓ Используй меню MUSIC BOT.",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+# =========================================================
+# MAIN
+# =========================================================
 
 def main():
-
     if not TOKEN:
         raise RuntimeError(
-            "Не задана переменная окружения BOT_TOKEN"
+            "Переменная BOT_TOKEN не установлена."
         )
 
-    app = (
+    application = (
         Application.builder()
         .token(TOKEN)
         .build()
     )
 
-    app.add_handler(
+    application.add_handler(
         CommandHandler(
             "start",
             start,
         )
     )
 
-    app.add_handler(
+    application.add_handler(
         CallbackQueryHandler(
-            callback_handler
+            callback_handler,
         )
     )
 
-    app.add_handler(
+    application.add_handler(
         MessageHandler(
-            filters.TEXT
-            & ~filters.COMMAND,
-            search_music,
+            filters.TEXT & ~filters.COMMAND,
+            text_handler,
         )
     )
 
-    app.run_polling()
+    logger.info("🎵 MUSIC BOT запущен")
+
+    application.run_polling(
+        drop_pending_updates=True,
+    )
 
 
 if __name__ == "__main__":
